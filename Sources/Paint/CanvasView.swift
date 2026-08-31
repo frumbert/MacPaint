@@ -11,7 +11,7 @@ enum CanvasHolder {
 // MARK: - Interaction state
 
 private enum DragMode: Equatable {
-    case stroke, erase, line, shape, curve
+    case stroke, erase, line, shape, curve, layerMove
     case selRect, selFree, selMove, selScale
     case polyFirst
     case canvasResize(String) // "e" | "s" | "se"
@@ -30,6 +30,8 @@ private struct DragState {
     var selHandle = -1
     var selOrig = CGRect.zero
     var moveOffset = CGPoint.zero
+    var layerMoveBase: CGImage?
+    var layerMoveDelta = CGPoint.zero
     var resizeStartSize = CGSize.zero
     var resizeNewSize = CGSize.zero
 }
@@ -249,7 +251,24 @@ final class DocumentNSView: NSView {
         g.scaleBy(x: zoom, y: zoom)
         g.interpolationQuality = zoom > 1 ? .none : .high
 
-        for layer in m.layers where layer.visible {
+        let moveDrag = (drag?.mode == .layerMove) ? drag : nil
+        for (idx, layer) in m.layers.enumerated() where layer.visible {
+            if let d = moveDrag, idx == m.activeLayerIndex, let img = d.layerMoveBase {
+                g.saveGState()
+                g.setAlpha(layer.opacity)
+                drawImageTopLeft(
+                    g,
+                    img,
+                    in: CGRect(
+                        x: d.layerMoveDelta.x,
+                        y: d.layerMoveDelta.y,
+                        width: CGFloat(m.docWidth),
+                        height: CGFloat(m.docHeight)
+                    )
+                )
+                g.restoreGState()
+                continue
+            }
             guard let img = layer.image() else { continue }
             g.saveGState()
             g.setAlpha(layer.opacity)
@@ -745,6 +764,13 @@ final class DocumentNSView: NSView {
         case .magnifier:
             m.zoomStep(right ? -1 : 1, focusDocPoint: p)
             return
+        case .move:
+            var d = DragState(mode: .layerMove, rightButton: right, start: p, last: p)
+            d.layerMoveBase = m.activeLayer.image()
+            d.layerMoveDelta = .zero
+            drag = d
+            needsDisplay = true
+            return
         case .sticker:
             m.stampSticker(at: p)
             return
@@ -775,6 +801,8 @@ final class DocumentNSView: NSView {
             eraseSegment(from: p, to: p)
         case .shape:
             d.mode = m.shapeId == "line" ? .line : .shape
+        case .move:
+            d.mode = .layerMove
         case .select:
             let hi = hitSelHandle(p)
             if hi >= 0 {
@@ -832,6 +860,8 @@ final class DocumentNSView: NSView {
         case .shape:
             d.rect = normRect(d.start, p, square: d.shiftDown)
             if let r = d.rect { m.selectionText = "\(Int(r.width)) × \(Int(r.height))px" }
+        case .layerMove:
+            d.layerMoveDelta = CGPoint(x: (p.x - d.start.x).rounded(), y: (p.y - d.start.y).rounded())
         case .curve:
             if var st = curveState {
                 switch st.phase {
@@ -916,6 +946,15 @@ final class DocumentNSView: NSView {
                 m.commit()
             }
             m.selectionText = ""
+        case .layerMove:
+            if let base = d.layerMoveBase {
+                applyLayerMove(baseImage: base, delta: d.layerMoveDelta)
+                if d.layerMoveDelta != .zero {
+                    m.commit()
+                } else {
+                    m.repaint()
+                }
+            }
         case .curve:
             if var st = curveState {
                 switch st.phase {
@@ -1031,6 +1070,34 @@ final class DocumentNSView: NSView {
         m.repaint()
     }
 
+    private func applyLayerMove(baseImage: CGImage, delta: CGPoint) {
+        guard let m = model else { return }
+        let layer = m.activeLayer
+        let ctx = layer.ctx
+        let rect = CGRect(x: 0, y: 0, width: m.docWidth, height: m.docHeight)
+        ctx.saveGState()
+        if layer.isBackground {
+            ctx.setBlendMode(.normal)
+            ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(rect)
+        } else {
+            ctx.setBlendMode(.clear)
+            ctx.fill(rect)
+            ctx.setBlendMode(.normal)
+        }
+        drawImageTopLeft(
+            ctx,
+            baseImage,
+            in: CGRect(
+                x: delta.x,
+                y: delta.y,
+                width: CGFloat(m.docWidth),
+                height: CGFloat(m.docHeight)
+            )
+        )
+        ctx.restoreGState()
+    }
+
     private func startAirbrush(d: inout DragState, color: RGB) {
         guard let m = model, let sl = d.strokeLayer else { return }
         BrushEngine.sprayAt(sl.ctx, d.start, size: m.currentSize, color: color)
@@ -1101,6 +1168,12 @@ final class DocumentNSView: NSView {
         guard canvasRectInView.contains(viewPt) else { NSCursor.arrow.set(); return }
         switch m.tool {
         case .text: NSCursor.iBeam.set()
+        case .move:
+            if drag?.mode == .layerMove {
+                NSCursor.closedHand.set()
+            } else {
+                NSCursor.openHand.set()
+            }
         case .select:
             let hi = hitSelHandle(docPt)
             if hi >= 0 {

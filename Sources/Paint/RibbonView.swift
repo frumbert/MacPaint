@@ -202,7 +202,7 @@ struct ToolsGroup: View {
                 GridRow {
                     toolBtn("Eraser", "eraser", .eraser)
                     toolBtn("Color picker", "eyedropper", .picker)
-                    toolBtn("Magnifier", "magnifyingglass", .magnifier)
+                    toolBtn("Move layer", "arrow.up.and.down.and.arrow.left.and.right", .move)
                 }
             }
         }

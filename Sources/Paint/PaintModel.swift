@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 // MARK: - Enums
 
 enum Tool: String {
-    case select, pencil, fill, text, eraser, picker, magnifier, brush, shape, sticker
+    case select, pencil, fill, text, eraser, picker, magnifier, move, brush, shape, sticker
 }
 
 enum BrushType: String, CaseIterable, Identifiable {
@@ -473,7 +473,7 @@ final class PaintModel: ObservableObject {
 
     func setTool(_ t: Tool) {
         guard tool != t else { return }
-        if selection != nil && t != .select && t != .magnifier && t != .picker {
+        if selection != nil && t != .select && t != .magnifier && t != .picker && t != .move {
             dropSelection(commit: true)
         }
         previousTool = tool
