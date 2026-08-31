@@ -11,7 +11,7 @@ enum CanvasHolder {
 // MARK: - Interaction state
 
 private enum DragMode: Equatable {
-    case stroke, erase, line, shape, curve, layerMove
+    case stroke, erase, line, shape, curve, textBox, layerMove
     case selRect, selFree, selMove, selScale
     case polyFirst
     case canvasResize(String) // "e" | "s" | "se"
@@ -65,6 +65,7 @@ final class DocumentNSView: NSView {
     // text tool
     private var textView: PaintTextView?
     private var textOrigin: CGPoint = .zero // doc coords
+    private var textBoxSizeDoc: CGSize?
 
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -325,6 +326,10 @@ final class DocumentNSView: NSView {
             case .line:
                 if let end = d.end {
                     strokeAndFillPath(g, m, linePath(from: d.start, to: end, shift: d.shiftDown), isOpen: true, right: d.rightButton)
+                }
+            case .textBox:
+                if let r = d.rect {
+                    drawMarquee(g, rect: r)
                 }
             case .shape:
                 if let r = d.rect {
@@ -752,7 +757,14 @@ final class DocumentNSView: NSView {
 
         switch m.tool {
         case .text:
-            startTextEditor(at: p)
+            drag = DragState(
+                mode: .textBox,
+                rightButton: right,
+                start: p,
+                last: p,
+                rect: CGRect(x: p.x, y: p.y, width: 1, height: 1)
+            )
+            needsDisplay = true
             return
         case .picker:
             if let c = m.pickColor(at: p) { m.setColor(well: right ? 2 : 1, c) }
@@ -857,6 +869,11 @@ final class DocumentNSView: NSView {
         case .line:
             d.end = p
             m.selectionText = "\(Int(abs(p.x - d.start.x))) × \(Int(abs(p.y - d.start.y)))px"
+        case .textBox:
+            d.rect = normRect(d.start, p, square: false)
+            if let r = d.rect {
+                m.selectionText = "\(Int(r.width)) × \(Int(r.height))px"
+            }
         case .shape:
             d.rect = normRect(d.start, p, square: d.shiftDown)
             if let r = d.rect { m.selectionText = "\(Int(r.width)) × \(Int(r.height))px" }
@@ -939,6 +956,14 @@ final class DocumentNSView: NSView {
                 m.commit()
             }
             m.selectionText = m.selection.map { "\(Int($0.rect.width)) × \(Int($0.rect.height))px" } ?? ""
+        case .textBox:
+            let rect = d.rect ?? CGRect(x: p.x, y: p.y, width: 0, height: 0)
+            if rect.width >= 3 || rect.height >= 3 {
+                startTextEditor(at: rect.origin, initialBoxSize: rect.size)
+            } else {
+                startTextEditor(at: p)
+            }
+            m.selectionText = ""
         case .shape:
             if let r = d.rect, r.width > 2 || r.height > 2 {
                 let shape = ShapeLibrary.byId(m.shapeId)
@@ -1194,7 +1219,7 @@ final class DocumentNSView: NSView {
 
     // MARK: text editor overlay
 
-    private func startTextEditor(at p: CGPoint) {
+    private func startTextEditor(at p: CGPoint, initialBoxSize: CGSize? = nil) {
         guard let m = model else { return }
         commitActiveText()
         let tv = PaintTextView(frame: .zero)
@@ -1204,6 +1229,7 @@ final class DocumentNSView: NSView {
         tv.allowsUndo = true
         tv.onEscape = { [weak self] in self?.cancelActiveText() }
         textOrigin = p
+        textBoxSizeDoc = initialBoxSize
         textView = tv
         addSubview(tv)
         m.textEditing = true
@@ -1238,15 +1264,19 @@ final class DocumentNSView: NSView {
         let origin = viewPoint(fromDoc: textOrigin)
         let text = tv.string.isEmpty ? "M" : tv.string
         let attrs = m.textStyle.attributes(color: m.color1.nsColor)
-        let lines = text.components(separatedBy: "\n")
-        var w: CGFloat = 80
-        for ln in lines {
-            let s = NSAttributedString(string: ln.isEmpty ? "M" : ln, attributes: attrs)
-            w = max(w, s.size().width + 16)
-        }
-        let lineH = m.textStyle.size * 1.35
-        let h = max(1, CGFloat(lines.count)) * lineH + 10
-        tv.frame = CGRect(x: origin.x, y: origin.y, width: min(w, CGFloat(m.docWidth) - textOrigin.x) * zoom, height: h * zoom)
+        let maxW = max(24, CGFloat(m.docWidth) - textOrigin.x)
+        let requestedW = max(24, textBoxSizeDoc?.width ?? 160)
+        let w = min(requestedW, maxW)
+        let attr = NSAttributedString(string: text, attributes: attrs)
+        let bounds = attr.boundingRect(
+            with: NSSize(width: max(12, w - 8), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let baseH = max(m.textStyle.size * 1.6, bounds.height + 10)
+        let requestedH = textBoxSizeDoc?.height ?? 0
+        let h = max(baseH, requestedH)
+        let maxH = max(20, CGFloat(m.docHeight) - textOrigin.y)
+        tv.frame = CGRect(x: origin.x, y: origin.y, width: w * zoom, height: min(h, maxH) * zoom)
     }
 
     func hasActiveText() -> Bool { textView != nil }
@@ -1258,6 +1288,7 @@ final class DocumentNSView: NSView {
         let boxW = tv.frame.width / zoom
         tv.removeFromSuperview()
         textView = nil
+        textBoxSizeDoc = nil
         m.textEditing = false
         if !text.isEmpty {
             m.rasterizeText(text, at: textOrigin, boxWidth: boxW)
@@ -1270,6 +1301,7 @@ final class DocumentNSView: NSView {
         NotificationCenter.default.removeObserver(self, name: NSText.didChangeNotification, object: tv)
         tv.removeFromSuperview()
         textView = nil
+        textBoxSizeDoc = nil
         model?.textEditing = false
         model?.repaint()
     }
